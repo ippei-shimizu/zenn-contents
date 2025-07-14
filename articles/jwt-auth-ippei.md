@@ -177,13 +177,206 @@ https://qiita.com/kunihiros/items/2722d690b1525813c45e
 
 ## 3. JWT認証の動作原理
 
+JWTの構造を理解したところで、次はそのJWTが実際のアプリケーションでどのように機能するのか、その「動作原理」を見ていきます。ユーザーのログインから、認証が必要な情報へのアクセスまで、一連の流れを追うことで、JWT認証の全体像がより明確になります。
+
 ### 3.1 認証フローの全体像
+
+JWT認証のフローは、大きく分けて「**①トークン発行**」と「**②トークンを利用したAPIアクセス**」の2つのフェーズで構成されます。
+
+```mermaid
+sequenceDiagram
+    participant Client as クライアント
+    participant AuthServer as 認証サーバー
+    participant ApiServer as APIサーバー
+
+    rect rgb(254, 243, 199)
+        Note over Client, AuthServer: ① トークン発行フェーズ
+        Client->>AuthServer: 1. ログイン要求 (ID/PW)
+        activate AuthServer
+        Note right of AuthServer: 認証情報を検証し、<br/>OKならJWTを生成・署名
+        AuthServer-->>Client: 2. JWTを返却
+        deactivate AuthServer
+    end
+
+    rect rgb(236, 253, 245)
+        Note over Client, ApiServer: ② APIアクセスフェーズ
+        Client->>ApiServer: 3. APIリクエスト (JWTをヘッダーに付与)
+        activate ApiServer
+        Note left of ApiServer: 4. JWTの署名・有効期限を検証
+        ApiServer-->>Client: 5. 検証OKならデータを返却
+        deactivate ApiServer
+    end
+```
+
+1. ログインとトークン発行
+  - **クライアント→サーバー** : ユーザーがIDとパスワードを入力し、ログインをリクエストします。
+  - **サーバー** : 受け取った認証情報を検証します。正しければ、ユーザー情報を含むペイロードと署名を持つJWTを生成します。
+  - **サーバー→クライアント** : 生成したJWTをクライアントに渡します。クライアントは、このJWTを安全な場所に保存します。（例：ローカルストレージやセッションストレージ）
+2. 保護されたリソースへのアクセス
+  - **クライアント→サーバー** : 認証が必要なAPIリクエストを送る際、HTTPの`Authorization`ヘッダーに、保存しておいたJWTを`Bearer`スキームとともに含めます。
+  - **サーバー** : リクエストを受け取ると、まず`Authorization`ヘッダーからJWTを取り出します。
+  - **サーバー** : 取り出したJWTの署名を検証し、改ざんがないか、そして信頼できる発行元からのものかを確認します。同時に、ペイロード内の有効期限（`exp`）が切れていないかもチェックします。
+  - **サーバー→クライアント** : 検証がすべて成功すれば、リクエストされた処理を実行し、結果をクライアントに返します。検証に失敗した場合は、`401 Unauthorized`エラーを返します。
 
 ### 3.2 トークンの生成プロセス
 
+サーバーはユーザーの認証に成功した後に、どのようにしてJWTを生成するのか、そのプロセスを詳しく見ていきます。
+
+```mermaid
+sequenceDiagram
+    participant Client as クライアント
+    participant AuthServer as 認証サーバー
+
+    rect rgb(254, 243, 199)
+        Note over AuthServer: JWT生成プロセス
+        AuthServer->>AuthServer: 1. ヘッダー(JSON: alg, typ)を準備
+        AuthServer->>AuthServer: 2. ペイロード(JSON: sub, exp, 他のクレーム)を準備
+        AuthServer->>AuthServer: 3. ヘッダーとペイロードをBase64URLエンコード
+        AuthServer->>AuthServer: 4. エンコード済みヘッダー + "." + エンコード済みペイロード を連結
+        AuthServer->>AuthServer: 5. 連結文字列を秘密鍵で署名 (HMACSHA256 等)
+        AuthServer->>AuthServer: 6. エンコード済みヘッダー . エンコード済みペイロード . 署名 を連結しJWT完成
+    end
+
+    rect rgb(236, 253, 245)
+        Note over AuthServer, Client: トークン返却
+        AuthServer-->>Client: 7. 生成したJWTを返却
+    end
+```
+
+1. **ヘッダーの準備** : `alg`と`typ`を含むJSONオブジェクトを用意します。
+2. **ペイロードの準備** : ユーザーID（`sub`）や有効期限（`exp`）など、必要なクレームを含むJSONオブジェクトを用意します。
+3. **エンコード** : ヘッダーとペイロードを、それぞれBase64URLエンコードします。
+4. **署名対象の作成** : エンコードされたヘッダーとペイロードを、`.`で連結します。
+5. **署名の生成** : 4で作成した文字列を、秘密鍵を使って署名アルゴリズムでハッシュ化し、署名を生成します。
+6. **JWTの完成** : 「エンコード済みヘッダー」「エンコード済みペイロード」「署名」を3つの`.`で連結して、最終的なJWTを作成します。
+
+:::details Node.jsでの実装例 (jsonwebtokenライブラリを使用)
+```javascript
+const jwt = require('jsonwebtoken');
+
+/**
+ * ユーザー情報に基づいてJWTを生成する関数
+ * @param {object} user - ユーザー情報 (id, email, roleなど)
+ * @returns {string} 生成されたJWT
+ */
+function generateToken(user) {
+  // ペイロードに含める情報を定義
+  const payload = {
+    sub: user.id,
+    email: user.email,
+    role: user.role,
+  };
+
+  // 秘密鍵（環境変数から取得するのが望ましい）
+  const secretKey = process.env.JWT_SECRET || 'your-very-secret-key';
+
+  // オプションでアルゴリズムや有効期限を指定
+  const options = {
+    expiresIn: '1h', // 有効期限: 1時間
+    algorithm: 'HS256' // 署名アルゴリズム
+  };
+
+  // jwt.sign()でトークンを生成
+  const token = jwt.sign(payload, secretKey, options);
+
+  return token;
+}
+
+// --- 使用例 ---
+const sampleUser = { id: 'user-12345', email: 'user@example.com', role: 'user' };
+const token = generateToken(sampleUser);
+console.log(token);
+```
+:::
+
 ### 3.3 トークンの検証プロセス
 
+クライアントからJWTを受け取ったサーバーは、その正当性を厳格に検証する必要があります。この検証プロセスこそが、JWT認証のセキュリティを担保する重要なステップになります。
+
+```mermaid
+sequenceDiagram
+    participant Client as クライアント
+    participant ApiServer as APIサーバー
+
+    rect rgb(236, 253, 245)
+        Note over ApiServer: JWT検証プロセス
+        Client->>ApiServer: 1. AuthorizationヘッダーでJWT受信
+        ApiServer->>ApiServer: 2. JWTを「ヘッダー」「ペイロード」「署名」に分割
+        ApiServer->>ApiServer: 3. 署名検証 (ヘッダー＋ペイロード, 秘密鍵)
+        ApiServer->>ApiServer: 4. `exp`/`nbf`/`aud`/`iss`などのクレーム検証
+        alt 検証OK
+            ApiServer-->>Client: 5. リクエスト処理を実行・200 OK返却
+        else 検証NG
+            ApiServer-->>Client: 6. 401 Unauthorized返却
+        end
+    end
+
+```
+
+1. **トークンの受信と分割** : `Authorization: Bearer <JWT>`ヘッダーからトークンを抽出し、`.`を基準にヘッダー、ペイロード、署名の3つのパートに分割します。
+2. **署名の検証**
+  - 受信したヘッダーとペイロード（エンコード済みの状態）を`.`で連結します。
+  - サーバーが保持している秘密鍵を使い、ヘッダーで指定されたアルゴリズムで署名を再計算します。
+  - 再計算した署名と、受信したJWTの署名パートが完全に一致するかを比較します。一致しなければ、トークンは改ざんされているか、不正な発行元からのものなので、即座に検証を中止しエラーとします。
+3. **クレームの検証**
+  - `exp`（有効期限）: トークンが期限切れになっていないかを確認します。
+  - `nbf`（有効開始日時）: トークンが有効期間内であるかを確認します。
+  - `aud`（受信者）, `iss`（発行者）: 必要に応じて、トークンが意図した受信者・発行者のものかを確認します。
+4. **検証完了** : すべての検証をパスした場合、そのトークンは正当なものと判断され、ペイロードからユーザー情報を抽出し、リクエストされた処理を続行します。
+
+:::details Node.jsでの検証ミドルウェア実装例
+```javascript
+const jwt = require('jsonwebtoken');
+
+/**
+ * JWTを検証するExpressミドルウェア
+ */
+function verifyToken(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  // 1. ヘッダーの存在と形式を確認
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: '認証トークンが必要です。' });
+  }
+
+  // "Bearer "の部分を取り除き、トークン本体を取得
+  const token = authHeader.split(' ')[1];
+  const secretKey = process.env.JWT_SECRET || 'your-very-secret-key';
+
+  try {
+    // 2. jwt.verify()でトークンを検証
+    // この関数内で、署名の検証と有効期限のチェックが自動的に行われる
+    const decodedPayload = jwt.verify(token, secretKey);
+
+    // 3. 検証成功後、リクエストオブジェクトにユーザー情報を格納
+    req.user = decodedPayload;
+
+    // 4. 次の処理へ
+    next();
+  } catch (error) {
+    // 検証失敗時のエラーハンドリング
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'トークンの有効期限が切れています。' });
+    }
+    return res.status(401).json({ error: '無効なトークンです。' });
+  }
+}
+```
+:::
+
 ### 3.4 ステートレス認証の仕組み
+
+JWT認証の核心的な利点は、**ステートレス**であることです。つまり、「サーバーがクライアントの状態を保持しない」という意味になります。
+
+セッション認証（ステートフル）では、サーバーは「どのセッションIDがどのユーザーか」という対応表を常に自身のストレージに保持しておく必要がありました。
+
+一方、JWT認証では、必要なユーザー情報はすべてJWT自体に含まれているため、サーバーは受け取ったJWTを検証するだけでよく、過去のリクエストやセッション情報を記憶しておく必要が一切ありません。
+
+このステートレスな性質が、以下のようなメリットをもたらします。
+
+- **サーバーの負荷軽減とシンプル化** : セッションストレージへの問い合わせが不要になるため、サーバーの負荷が減り、アーキテクチャもシンプルになります。
+- **水平スケーリングの容易さ** : どのサーバーがリクエストを受け取っても、同じ秘密鍵さえ持っていればJWTを検証できます。そのため、サーバーの台数を増やすだけで簡単システム全体の性能を向上させることができます。
+- **マイクロサービスとの高い親和性** : 各サービスが独立してJWTを検証できるため、サービス間の認証連携が非常にスムーズになります。
 
 ## 4. 署名アルゴリズムの理解
 
