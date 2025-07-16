@@ -495,15 +495,262 @@ jwt.verify(token, publicKey, {
 
 ## 5. JWT実装の基本
 
+これまでは、JWTの理論的な側面を学んできました。次は、Node.jsとExpressを使ってJWT認証の基本的な機能を実装していきます。
+
 ### 5.1 開発環境の準備
 
-### 5.2 JWTライブラリの選択
+まずは、JWT認証を実装するための土台となるNode.jsプロジェクトを準備します。
 
-### 5.3 トークン生成の実装
+#### 1. プロジェクトの初期化とパッケージのインストール
 
-### 5.4 トークン検証の実装
+ターミナルを開き、以下のコマンドを実行してプロジェクトフォルダを作成し、必要なライブラリをインストールします。
 
-### 5.5 エラーハンドリング
+```bash
+# プロジェクト用のディレクトリを作成し、移動
+mkdir jwt-practice
+cd jwt-practice
+
+# npmプロジェクトを初期化
+npm init -y
+
+# 必要なライブラリをインストール
+# express: Webフレームワーク
+# jsonwebtoken: JWTの生成・検証を行うライブラリ
+# bcryptjs: パスワードを安全にハッシュ化するためのライブラリ
+# dotenv: 環境変数を.envファイルから読み込むためのライブラリ
+npm install express jsonwebtoken bcryptjs dotenv
+```
+
+#### 2. プロジェクトの基本構造
+
+分かりやすく管理するために、以下のようなディレクトリ構造で進めていきます。
+
+```bash
+jwt-practice/
+├── controllers/      # リクエストを処理するロジック
+│   └── authController.js
+├── middleware/       # 認証などのミドルウェア
+│   └── authMiddleware.js
+├── .env              # 環境変数ファイル
+├── app.js            # アプリケーションのメインファイル
+└── package.json
+```
+
+#### 3. 環境変数の設定
+
+プロジェクトのルートに`.env`ファイルを作成し、JWTの秘密鍵などの設定情報を記述します。
+
+:::message alert
+.envファイルには、パスワードや秘密鍵などの機密情報が含まれます。必ず.gitignoreファイルに追加して、Gitリポジトリにコミットしないようにしてください。
+:::
+
+```env
+# .env
+
+# サーバーのポート番号
+PORT=3001
+
+# JWTの秘密鍵（32文字以上のランダムな文字列を推奨）
+JWT_SECRET='your_super_secret_and_long_string_for_jwt_practice'
+
+# アクセストークンの有効期限
+JWT_EXPIRES_IN='1h'
+```
+
+#### 5.2 トークン生成の実装
+
+ユーザーがログインに成功した際に、サーバーがJWTを発行する機能を実装します。
+
+**`authController.js`の作成**
+controllersフォルダにauthController.jsを作成します。ここでは、擬似的なユーザーデータを使ってログイン処理とトークン生成を行います。
+
+```javascript
+// controllers/authController.js
+
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+
+// 本来はデータベースから取得するユーザーデータ
+const mockUser = {
+  id: 'user-123',
+  email: 'test@example.com',
+  // パスワードはハッシュ化して保存する
+  passwordHash: bcrypt.hashSync('password123', 10), 
+  role: 'user'
+};
+
+// ログイン処理とトークン発行を行う関数
+const login = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // 1. ユーザーの存在とパスワードを検証
+    if (email !== mockUser.email || !bcrypt.compareSync(password, mockUser.passwordHash)) {
+      return res.status(401).json({ error: 'メールアドレスまたはパスワードが正しくありません。' });
+    }
+
+    // 2. ペイロードに含める情報を定義
+    const payload = {
+      sub: mockUser.id,
+      email: mockUser.email,
+      role: mockUser.role,
+    };
+
+    // 3. 秘密鍵とオプションを設定
+    const secretKey = process.env.JWT_SECRET;
+    const options = {
+      expiresIn: process.env.JWT_EXPIRES_IN,
+    };
+
+    // 4. JWTを生成
+    const token = jwt.sign(payload, secretKey, options);
+
+    // 5. トークンをクライアントに返却
+    res.json({
+      message: 'ログインに成功しました。',
+      accessToken: token,
+      tokenType: 'Bearer',
+      expiresIn: 3600 // 1時間（秒）
+    });
+
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'サーバー内部でエラーが発生しました。' });
+  }
+};
+
+module.exports = { login };
+```
+
+#### 5.3 トークン検証の実装
+
+次に、APIリクエストで送られてきたJWTを検証し、認証済みユーザーからのリクエストのみを許可する「認証ミドルウェア」を実装します。
+
+**`authMiddleware.js`の作成**
+middlewareフォルダにauthMiddleware.jsを作成します。
+
+```javascript
+// middleware/authMiddleware.js
+
+const jwt = require('jsonwebtoken');
+
+// トークンを検証するミドルウェア
+const authenticateToken = (req, res, next) => {
+  // 1. Authorizationヘッダーを取得
+  const authHeader = req.headers['authorization'];
+  // ヘッダーが存在すれば、"Bearer "の部分を取り除いてトークンを取得
+  const token = authHeader && authHeader.split(' ')[1];
+
+  // 2. トークンが存在しない場合はエラー
+  if (token == null) {
+    return res.status(401).json({ error: '認証トークンが必要です。' });
+  }
+
+  // 3. トークンを検証
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    // 4. 検証でエラーが発生した場合（期限切れ、不正な署名など）
+    if (err) {
+      return res.status(403).json({ error: '無効なトークンです。アクセスが拒否されました。' });
+    }
+
+    // 5. 検証成功。リクエストオブジェクトにユーザー情報を格納
+    req.user = user;
+
+    // 6. 次の処理へ
+    next();
+  });
+};
+
+module.exports = { authenticateToken };
+```
+
+#### 5.4 アプリケーションへの組み込み
+
+最後に、作成したコントローラーとミドルウェアをExpressアプリケーションに組み込みます。
+
+**`app.js`の作成**
+プロジェクトのルートにapp.jsを作成します。
+
+```javascript
+// app.js
+
+require('dotenv').config(); // .envファイルの内容を読み込む
+const express = require('express');
+const { login } = require('./controllers/authController');
+const { authenticateToken } = require('./middleware/authMiddleware');
+
+const app = express();
+app.use(express.json()); // JSON形式のリクエストボディを解析する
+
+const PORT = process.env.PORT || 3001;
+
+// --- ルート定義 ---
+
+// 誰でもアクセスできる公開ルート
+app.get('/', (req, res) => {
+  res.send('JWT認証のサンプルアプリケーションへようこそ！');
+});
+
+// ログインエンドポイント（トークンを発行）
+app.post('/api/login', login);
+
+// 認証が必要な保護されたルート
+// authenticateTokenミドルウェアが先に実行され、トークンを検証する
+app.get('/api/profile', authenticateToken, (req, res) => {
+  // ミドルウェアによって`req.user`にユーザー情報が格納されている
+  res.json({
+    message: `ようこそ、 ${req.user.email} さん！`,
+    user: req.user
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`サーバーがポート${PORT}で起動しました。`);
+});
+```
+
+これで、JWT認証の基本的な実装は完了です。node app.js でサーバーを起動し、APIクライアントツール（Postmanなど）または curl を使って以下のようにリクエストを送信してみてください。
+
+```bash
+# 1. サーバー起動
+node app.js
+# サーバーがポート3001で起動します。
+
+# 2. ログイン（トークン取得）
+curl -X POST http://localhost:3001/api/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "test@example.com",
+    "password": "password123"
+  }'
+```
+```json
+# 上記のレスポンス例
+{
+  "message": "ログインに成功しました。",
+  "accessToken": "eyJhbGciOiJI…（省略）…",
+  "tokenType": "Bearer",
+  "expiresIn": 3600
+}
+```
+```bash
+# 3. プロフィール取得（取得したトークンを Authorization ヘッダーにセット）
+curl http://localhost:3001/api/profile \
+  -H "Authorization: Bearer eyJhbGciOiJI…（先ほど取得したトークン）…"
+```
+```json
+# プロフィールレスポンス例
+{
+  "message": "ようこそ、 test@example.com さん！",
+  "user": {
+    "sub": "user-123",
+    "email": "test@example.com",
+    "role": "user",
+    "iat": 1627384950,
+    "exp": 1627388550
+  }
+}
+```
 
 ## 6. バックエンドでの実装
 
