@@ -2,7 +2,7 @@
 title: "コードを書きながら学ぶ プログラミングの原理原則"
 emoji: "🛡️"
 type: "tech" # tech: 技術記事 / idea: アイデア
-topics: ['KISS', 'YAGNI', 'DRY', 'SLAP', 'OCP', 設計']
+topics: ['KISS', 'YAGNI', 'DRY', 'SLAP', 'OCP']
 published: false
 ---
 
@@ -217,11 +217,282 @@ end
 - 本当にその実装が必要になった時に、設計を考える。要件が見えていない段階で先回りでコードを書かない。
 
 ## DRY / 参照の一点性（コードの重複を排除する）
+KISSとYAGNIが「シンプルに保つ」ための原則だったのに対して、ここで扱う2つの原則は「重複を作らない」ための原則です。
+普段コードを書いている中で「この条件どこかで書いたな」「同じカラムの判定が別のメソッドにもあるな」などと感じる場面があると思います。
+
+DRY（Don't Repeat Yourself）は「同じロジックやコードを複数箇所に書かない」という観点で、参照の一点性は「1つの事実を1箇所だけで定義する」という観点です。
+
+### DRY
+DRY（Don't Repeat Yourself）は、同じロジックや条件・パターンを複数箇所に書かない、ということです。重複したコードがあれば、抽象化（関数化・モジュール化・定数化）をして1箇所に集約します。
+
+重複したコードを残しておくと、以下のようなコストが発生します。
+- 読むコストが増える
+  - 同じ意味のコードを何度も読み解く必要があり、本当に同じ意図なのかを毎回確認する手間がかかる。
+- 修正コストが増える
+  - 仕様変更のたびに複数箇所で正確に変える必要があり、1箇所でも漏れるとバグの温床になる。
+- テストコストが増える
+  - 同じロジックを複数箇所でテストする必要があり、テストが冗長になる。
+
+#### コードで見る
+ユーザーの権限判定を行う `User`モデルを例にします。「投稿の編集」「投稿の削除」「コメント」と複数のメソッドがありますが、いずれも「アクティブで、BANされていない」という前提条件を共通で持っているケースです。
+
+##### Before: 同じ前提条件が複数メソッドに散らばる
+```rb
+class User < ApplicationRecord
+  def can_edit_post?(post)
+    return false unless active?
+    return false if banned_at.present?
+    post.author == self || admin?
+  end
+
+  def can_delete_post?(post)
+    return false unless active?
+    return false if banned_at.present?
+    post.author == self || admin?
+  end
+
+  def can_comment?(post)
+    return false unless active?
+    return false if banned_at.present?
+    !post.locked?
+  end
+end
+```
+
+**何が問題か**
+- 同じ前提条件が3メソッドに重複している
+  - `active?` と `banned_at.present?` の2つのチェックが、3つのメソッドそれぞれに書かれている。読み手は「全メソッドで本当に同じチェックをしているのか？」を確認するために、3箇所を見比べる必要がある。
+- 仕様変更時に修正漏れが起きやすい
+  - 例えば、「一時停止状態のユーザーも操作できないようにする」という要件が来た時、3箇所すべてに修正を入れる必要がある。1箇所でも漏れると、特定の操作だけ抜け道ができてしまうバグになる。
+- 各メソッドの本来の責務にノイズが入る
+  - `can_edit_post?` の本来の責務は「投稿者本人か管理者かを判定すること」であり、共通の条件が入ってしまうことにより、ノイズになっている。
+
+##### After: 共通の前提をprivateメソッドにまとめる
+```rb
+class User < ApplicationRecord
+  def can_edit_post?(post)
+    return false unless eligible?
+    post.author == self || admin?
+  end
+
+  def can_delete_post?(post)
+    return false unless eligible?
+    post.author == self || admin?
+  end
+
+  def can_comment?(post)
+    return false unless eligible?
+    !post.locked?
+  end
+
+  private
+
+  def eligible?
+    active? && banned_at.blank?
+  end
+end
+```
+共通の前提条件を `eligible?` という1つのメソッドに集約しました。「アクティブで、BANされていない」という条件に名前が付き、各メソッドの本来の責務が全面にでるようになりました。これで、仕様変更があった時も、修正するのは `eligible?` の1箇所だけで済みます。
+
+#### まとめ
+- 同じロジックや条件が複数箇所に登場したら、抽象化できないかを検討する。
+- 抽象化の最大の価値は「1箇所で済む」ことよりも、「修正漏れによるバグを防げる」こと。
+- 共通条件を切り出すと、各メソッドの本来の責務が前面に出て、コードの意図が読みやすくなる。
+
+### 参照の一点性
+参照の一点性（Single Point of Reference）は、ある事実は1箇所だけに定義し、以後はそれを参照する、という考え方です。
+DRYと近い概念ですが、DRYが「同じロジック・コード」の重複に焦点を当てるのに対して、参照の一点性は「データや状態をどこで管理するか」という、データ側の観点に焦点を当てた原則です。
+
+同じ事実を複数箇所で持つと、以下のような問題が発生します。
+- 整合性が崩れた状態が発生しうる
+  - 片方はアクティブ、もう片方は削除済みといっているような、矛盾した状態がデータ上で生まれる。
+- 読み手が「どっちが正？」と考える必要がある
+  - 同期が取れているのか、片方だけ信じればいいのか、状態を読むたびに余計な判断が必要になる。
+- 更新時に漏れが起きやすい
+  - 状態を変えるたびに複数箇所を同時に更新する必要があり、片方を忘れると不整合になる。
+
+#### コードで見る
+ユーザーの「削除されたか」を表現する `User` モデルを例にします。`active` という booleanカラムと、`deleted_at` という timestampカラムの両方で「削除されたか」を表現してしまっているケースです。
+
+##### Before: 同じ事実が2つのカラムに分散している
+```rb
+class User < ApplicationRecord
+  # active: boolean
+  # deleted_at: datetime
+
+  def active?
+    active && deleted_at.nil?
+  end
+
+  def deleted?
+    !active || deleted_at.present?
+  end
+
+  def soft_delete!
+    update!(active: false, deleted_at: Time.current)
+  end
+
+  def restore!
+    update!(active: true, deleted_at: nil)
+  end
+end
+```
+
+**何が問題か**
+- 真実の出所が2箇所ある
+  - `active` カラムと `deleted_at` カラムの両方が「削除されたか」を表現している。どちらが真実のなのか定まっていない。
+- 矛盾した状態がデータ上で起こりうる
+  - `active = true` かつ `deleted_at = "2024-01-01"` のような、論理的にありえない状態がデータベース上に発生してしまう可能性があり、バグやデータ移行で事故りやすい。
+- 更新が2倍の手間になる
+  - `soft_delete!` でも `restore!` でも、2つのカラムを必ず両方更新しないといけない。片方の更新漏れがあると、不整合状態になる。
+- 派生メソッドの判定式が複雑になる
+  - `active?` も `deleted?` も「2つのカラムを見て総合判断する」ロジックになっている。本来「削除されたか」というシンプルな問いに対して、複雑な判定が必要になっている。
+
+##### After: deleted_atだけを真実とし、activeは派生で表現
+```rb
+class User < ApplicationRecord
+  # deleted_at: datetime のみ
+  # active カラムは廃止
+
+  def active?
+    deleted_at.nil?
+  end
+
+  def deleted?
+    deleted_at.present?
+  end
+
+  def soft_delete!
+    update!(deleted_at: Time.current)
+  end
+
+  def restore!
+    update!(deleted_at: nil)
+  end
+end
+```
+`deleted_at` だけを「削除されたか」の真実として置きました。`active?`も`deleted?`も、そこから派生して計算するメソッドになっています。データベース上で矛盾した状態が発生する可能性がなくなり、`soft_delete!`も`restore!`も1つのカラムを更新するだけで済むようになりました。
+
+#### まとめ
+- 同じ事実を表現するカラム・属性・変数は、1箇所だけにする。
+- 派生情報は「真実の出所」から計算して返すメソッドで表現すると、整合性は自動的に保たれる。
+- 真実の出所が複数あると、矛盾した状態がデータ上で発生し、更新漏れによる不整合バグの温床になる。
 
 ## SLAP（抽象化レベル揃える）
+KISSとYAGNIは「シンプルに保つ」、DRYと参照の一点性で「重複を作らない」を扱ってきました。次はもう少し別の角度から「読みやすさ」を支える原則を見ていきます。
 
+KISSの章では「メソッドを過剰に分割すると追跡コストが上がる」という話をしました。一方で、メソッドを全く分けずに1つの長いメソッドに処理を詰め込むと、今度は「いまどの段階の話をしているのか」が読み取れなくなります。意味のある単位で分けるための原則が「SLAP」です。
+
+SLAP（Single Level of Abstraction Principle）は、1つの関数の中では抽象化レベルを揃える、ということです。具体的には、高レベルの「何をしているか（What）」と、低レベルの「どうやっているか（How）」を、同じ関数の中に混ぜないように書きます。
+
+抽象化レベルを揃えると、以下のメリットがあります。
+- 上位関数を読むだけで処理の全体像が掴める
+  - 関数の本体がそのまま「目次」のようになる。
+- 認知負荷が下がる
+  - 詳細を読みたいときだけ下位の関数に降りていけば良いので、読み手が抽象化レベルを切り替える回数が減る。
+- 修正範囲を見極めやすくなる
+  - 「どの抽象化レベルで何が起きているか」が明確になるので、変更すべき場所を素早く特定できる。
+
+抽象化レベルが揃った関数は、他の関数を呼び出すコードだけで構成された 複合関数になります。複合関数は処理を直接行わず、単に「次にこれをして、次にこれをする」と並べているだけのように見えますが、それこそが「目次」としての価値を持ちます。
+
+#### コードで見る
+ECサイトの注文確定処理を行う `Order#confirm!` メソッドを例にします。在庫の確認・減算、ポイント付与、ステータス更新、通知...と、複数の処理を1つのメソッドに書いた結果、こうなったとします。
+
+##### Before: 高レベルと低レベルが1つのメソッドに混在
+```rb
+class Order < ApplicationRecord
+  def confirm!
+    # 在庫チェック
+    items.each do |item|
+      stock = Stock.find_by(product_id: item.product_id)
+      raise "Out of stock" if stock.nil? || stock.quantity < item.quantity
+    end
+
+    # 在庫減算
+    items.each do |item|
+      stock = Stock.find_by(product_id: item.product_id)
+      stock.update!(quantity: stock.quantity - item.quantity)
+    end
+
+    # ポイント付与
+    points = (subtotal * 0.01).to_i
+    user.update!(points: user.points + points)
+
+    # ステータス更新
+    update!(status: "confirmed", confirmed_at: Time.current)
+
+    # Slack通知
+    SlackClient.new.post(text: "注文 ##{id} が確定")
+  end
+end
+```
+
+**何が問題か**
+- 抽象化レベルが大きく異なる処理が同じ関数に並んでいる
+  - 「在庫を確認する」「ポイントを付与する」という高レベルの意図と、「`Stock.find_by(product_id: ...)`」「`(subtotal * 0.01).to_i`」のような低レベルの実装詳細が、同じインデントで並んでしまっている。読み手は「いま何をしているのか」を理解するために、毎行抽象化レベルを切り替えながら読む必要がある。
+- 全体像が把握しづらい
+  - `confirm!` という名前の処理が、結局「どんなステップで」確定されるかは、コメントを目印にしないと読み取れない。コメントが消えたら、最初から読み解くしかない。
+- コードがコメントに頼った構造になっている
+  - 「在庫チェック」「在庫減算」「ポイント付与」などのコメントがないと、各ブロックの境界すらわかりにくい。コードそのものが意図を語れていない状態になっている。
+
+##### After: confirm! が「目次」のように読める
+```rb
+class Order < ApplicationRecord
+  def confirm!
+    ensure_stock_available!
+    decrement_stock
+    award_points
+    mark_as_confirmed
+    notify_confirmation
+  end
+
+  private
+
+  def ensure_stock_available!
+    items.each do |item|
+      stock = Stock.find_by(product_id: item.product_id)
+      raise "Out of stock" if stock.nil? || stock.quantity < item.quantity
+    end
+  end
+
+  def decrement_stock
+    items.each do |item|
+      stock = Stock.find_by(product_id: item.product_id)
+      stock.update!(quantity: stock.quantity - item.quantity)
+    end
+  end
+
+  def award_points
+    points = (subtotal * 0.01).to_i
+    user.update!(points: user.points + points)
+  end
+
+  def mark_as_confirmed
+    update!(status: "confirmed", confirmed_at: Time.current)
+  end
+
+  def notify_confirmation
+    SlackClient.new.post(text: "注文 ##{id} が確定")
+  end
+end
+```
+`confirm!` メソッドの中身を読むだけで、「在庫を確認 → 減算 → ポイント付与 → ステータス更新 → 通知」という確定処理の全体像が掴めるようになりました。メソッド名そのものが処理の意図を表す形になっています。
+
+各メソッドの詳細を読みたい場合は、対応する `private` メソッドに降りていくだけです。
+
+ここで、KISSの章で扱った「過剰なメソッド分割」との違いを補足しておきます。KISSでは、`quantity_of(item)` のように `item.quantity` を返すだけの意味のないラッパーを作ることを避ける、という内容でした。一方、SLAPは、意味のある単位（処理の1ステップに対応する単位）でメソッドを切り出すことを求めます。
+
+#### まとめ
+- 1つの関数の中では、抽象化レベルを揃える。「何をしているか」と「どうやっているか」を同じ関数に混ぜない。
+- 抽象化レベルが揃った関数は「目次」のように読め、コメントなしで全体像が掴めるようになる。
 
 ## 名前重要（名前でコードの意図がわかるように）
+ここまで、KISS/YAGNI/DRY/参照の一点性/SLAPを扱ってきましたが、いずれも「コードをどう構造化するか」という観点での原則でした、一方、「名前重要」はコードの中で使う名前そのものをどうつけるかに焦点を当てた原則です。
+
+名前重要は、コードの中で命名は最重要課題だ、という考え方です。名前は短いコメントであり、関数名・変数名・クラス名を読むだけで「何をしているか」「何を返すか」「どう使うか」が伝わるように書きます。
+
+良い名前があれば、関数の中身を毎回開いて読む必要がなく、呼び出し側のコードだけで処理の流れが理解できるようになります。逆に名前が曖昧だと、読み手は中身に降りていって実装を読み解かないと意図がつかめません。命名が正しくできているということは。その要素が正しく理解されて、正しく設計されているという証でもあります。
+
 
 
 ## OCP（拡張に開き、修正に閉じる）
