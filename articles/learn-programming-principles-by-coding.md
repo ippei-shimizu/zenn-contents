@@ -2,7 +2,7 @@
 title: "コードを書きながら学ぶ プログラミングの原理原則"
 emoji: "🛡️"
 type: "tech" # tech: 技術記事 / idea: アイデア
-topics: []
+topics: ['KISS', 'YAGNI', 'DRY', 'SLAP', 'OCP', 設計']
 published: false
 ---
 
