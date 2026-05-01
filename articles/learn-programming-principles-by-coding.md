@@ -14,7 +14,7 @@ published: false
 
 そこで、改めて「プログラミングの原理原則」について体系的に学び直したいと考え、その学習のアウトプットとして本記事を書いています。
 
-また、AIが大量のコードを書く時代だからこそ、そのアウトプットの良し悪しを判断する物差しとして「プログラミングの原理原則」がより重要になっていると考えていることも、学び直しの動機のひとつです。
+また、AIが大量のコードを書く時代だからこそ、そのアウトプットの良し悪しを判断する物差しとして「プログラミングの原理原則」がより重要になってくると思っています。
 
 ## コードは必ず変更されることを前提に書く
 
@@ -575,7 +575,88 @@ discounted = user.discounted_price(product)
 - 「どう実装したか」ではなく、「何を返すか・何を達成するか」を表現する。否定形を避ける。曖昧な動詞を避ける。略称、1文字変数を避ける。
 
 ## OCP（拡張に開き、修正に閉じる）
+OCPは「機能追加がきた時に、既存コードをどれだけ守れる設計になっているか」に焦点を当てた原則です。
+OCP（Open-Closed Principle）は、コードを「拡張に対しては開いている、修正に対して閉じている」状態にしよう、という設計原則です。新しい機能を追加する時には、新しいコードを加えるだけで済み、すでに動いているコードには手を入れなくていい、という設計を目指すものです。
 
+OCPが満たされていると、以下のような恩恵があります。
+- 機能追加時に既存コードを変更しないため、リグレッションのリスクが下がる。
+- レビュー範囲が新規追加部分に限定されるので、レビュアーの負荷も下がる。
+- 「変更時の影響範囲」を読み手が脳内で追跡する負荷が減る。
+
+逆にOCPが守られていないと、新しい振る舞いを追加するたびに既存コードに手を入れる必要が出てきます。最も典型的なのが、`if/elsif` の連鎖が増え続けるパターンです。新しい分岐を1つ足すために既存メソッドを開く、というのはOCP違反のサインの1つだと思います。
+
+ただし、OCPはどこでも適用するべきものでないという点も同時に意識したいです。すべての分岐を最初からStrategyパターンで作り込むと、未使用の抽象化クラスが量産されて、YAGNIに違反します。
+
+#### コードで見る
+通知の送信処理を行う `NotificationSender` を例にします。Slack/Email/SMSの3つのチャンネルに対応していて、`channel` の値で送信先を分岐しているコードになります。
+
+##### Before: if/elsif の連鎖で分岐
+```rb
+class NotificationSender
+  def dispatch(notification)
+    if notification.channel == "slack"
+      SlackClient.new.post(notification.message)
+    elsif notification.channel == "email"
+      Mail.deliver(to: notification.email, subject: "通知", body: notification.message)
+    elsif notification.channel == "sms"
+      SmsClient.new.send(notification.phone, notification.message)
+    end
+  end
+end
+```
+
+**何が問題か**
+- 新しいチャンネルを追加するたびに `dispatch` メソッドを修正する必要がある
+  - 例えば「アプリ内通知」を追加したくなったら、`elsif notification.channel == "in_app"` の分岐を `dispatch` メソッドに足すことになるので、動いているコードに手をいれる必要があり、リグレッションのリスクがともなう。
+- 1つのメソッドに複数チャンネルの実装詳細が混ざっている
+  - Slack のクライアント呼び出し、Mail の DSL、SMS のクライアント呼び出しが、同じメソッド内に並んでいる。
+- テストの網羅が大変
+  - チャネルが増えるたびに、`dispatch` メソッドのテストケースも増えていく。本来なら各チャネルごとに独立してテストできた方が望ましい。
+
+##### After: チャネルごとに Strategy クラスへ
+```rb
+class NotificationSender
+  CHANNELS = {
+    "slack" => SlackChannel,
+    "email" => EmailChannel,
+    "sms"   => SmsChannel
+  }.freeze
+
+  def dispatch(notification)
+    CHANNELS.fetch(notification.channel).new.deliver(notification)
+  end
+end
+
+class SlackChannel
+  def deliver(notification)
+    SlackClient.new.post(notification.message)
+  end
+end
+
+class EmailChannel
+  def deliver(notification)
+    Mail.deliver(to: notification.email, subject: "通知", body: notification.message)
+  end
+end
+
+class SmsChannel
+  def deliver(notification)
+    SmsClient.new.send(notification.phone, notification.message)
+  end
+end
+```
+チャネルを `deliver(notification)` という共通インターフェースを持ったクラスに切り出しました。`NotificationSender#dispatch` は「`channel` の値に対応するクラスを選んで `deliver` を呼ぶだけ」というシンプルな構造になっています。
+
+これで、新しいチャネル（例: in_app）を追加する時にやることは、以下の2つだけです。
+1. `InAppChannel` クラスを新規作成して、`deliver(notification)` を実装する
+2. `CHANNELS` ハッシュに `"in_app" => InAppChannel` を1行追加する
+
+`NotificationSender#dispatch` 自体には一切手を入れません。拡張に対しては開いていて、修正に対しては閉じている状態が実現できました。
+
+#### まとめ
+- 機能追加時に既存コードを変更しなくて済むように、共通インターフェース + Strategy で分岐を分離する。
+- if/elsif の連鎖は OCP 違反のサイン。新しい分岐を足すたびに既存メソッドを開いているなら、Strategy 化を検討する。
+- ただし OCPはどこにでも適用すべきではない。「変化が予想される部分」「実際に変化が起きた部分」に絞って遅延適用するのが、YAGNIとの両立を取るコツ。
 
 ## 単一責任（関心を分離する）
 
