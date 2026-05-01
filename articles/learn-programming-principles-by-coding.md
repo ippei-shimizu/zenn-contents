@@ -495,7 +495,84 @@ end
 
 実際、自分自身もプルリクエストのレビューで「このメソッド名だと何をしているのか分かりにくい」と指摘されることが多く、名前の付け方が設計の良し悪しに直結すると感じる場面が増えています。命名に時間をかけて考えることは、そのコードが何のために存在するのか・どう使うべきかを、自分の中で整理することにも繋がります。
 
+#### コードで見る
+ユーザーを表す `User` モデルを例にします。実装としては動作するものの、4つのメソッドそれぞれに命名上の引っかかりがある状態です。
 
+##### Before: 複数の命名問題が混在
+```rb
+class User < ApplicationRecord
+  def self.filter_by_role_and_active
+    where(role: "admin", active: true)
+  end
+
+  def not_banned?
+    banned_at.nil?
+  end
+
+  def process(amount)
+    self.balance -= amount
+    save!
+  end
+
+  def calc(p)
+    p.price * 0.9
+  end
+end
+```
+
+呼び出し側のコードはこのようになります。
+```rb
+admins = User.filter_by_role_and_active
+if user.not_banned?
+  user.process(1000)
+end
+discounted = user.calc(product)
+```
+
+**何が問題か**
+- 効果ではなく、実装手段で命名している（`filter_by_role_and_active`）
+  - 「どう実装したか（roleとactiveでフィルタする）」を表しているだけで、「結局このメソッドは何を返すのか」が伝わってこない。呼び出し側の `User.filter_by_role_and_active` を読んでも、返ってくるのが何のリストかが曖昧。「どう実装したか」ではなく「何を返すか・何を達成するか」で命名したい。
+- 否定形が読みづらさを生む（`not_banned?`）
+  - 名前自体に否定を含むため、反対の意味を表すときは `!user.not_banned?` となり、二重否定で読み手の脳を疲れさせてしまう。最初から肯定形で書くべき。
+- 動詞が曖昧で何をしているか伝わらない（`process`）
+  - 「処理する」としか言っておらず、呼び出し側の `user.process(1000)` を読んでも、引き落としなのか入金なのか送金なのかがわからない。`process` `handle` `execute` のような曖昧な動詞は、自分もよくやってしまうパターン。
+- 略称・1文字変数で意図が消える（`calc(p)`）
+  - 何を計算しているのか、`p` が何を指しているのかが伝わらない。`p` は `product` か `price` か `payment` か、読み手の推測コストが上がる。
+
+##### After: 名前で意図が伝わる
+```rb
+class User < ApplicationRecord
+  def self.admins
+    where(role: "admin", active: true)
+  end
+
+  def banned?
+    banned_at.present?
+  end
+
+  def withdraw(amount)
+    self.balance -= amount
+    save!
+  end
+
+  def discounted_price(product)
+    product.price * 0.9
+  end
+end
+```
+呼び出し側のコードは、名前を変えただけでこのように読みやすくなります。
+```rb
+admins = User.admins
+unless user.banned?
+  user.withdraw(1000)
+end
+discounted = user.discounted_price(product)
+```
+呼び出し側のコードを見るだけで、「管理者一覧を取得し」「BANされていなければ」「残高から引き落として」「商品の割引価格を計算する」という処理が、コメントなしで読み下せるようになりました。
+
+#### まとめ
+- 名前は「短いコメント」のようなものであり、中身を開かなくても、呼び出し側だけで処理の流れが読み下せるように命名する。
+- 「どう実装したか」ではなく、「何を返すか・何を達成するか」を表現する。否定形を避ける。曖昧な動詞を避ける。略称、1文字変数を避ける。
 
 ## OCP（拡張に開き、修正に閉じる）
 
