@@ -659,7 +659,100 @@ end
 - ただし OCPはどこにでも適用すべきではない。「変化が予想される部分」「実際に変化が起きた部分」に絞って遅延適用するのが、YAGNIとの両立を取るコツ。
 
 ## 単一責任（関心を分離する）
+単一責任は、1つのクラスやモジュールに、複数の責務を持たせないという、設計の境界線をどこで引くかに焦点を当てた原則です。
 
+単一責任の原則と関心の分離は、別々の原則として整理されることもありますが、「1つの単位に、複数の関心（変更理由）を混在させない」という点では共通しています。
+
+一言で言うと、1つのクラス・モジュール・メソッドが担う責務は、1つだけにするということです。クラス名から「何をする責務のクラスか」が一言で答えられる状態を目指します。
+
+責務を1つに絞ると、以下のようなメリットがあります。
+- 変更時の影響範囲が小さくなる
+  - そのクラスの変更理由が1つなので、修正が他の機能に波及しにくい。
+- クラス名から責務が想像しやすくなる
+  - 読み手が「結局このクラスは何をしているのか」を毎回探す必要がなくなる。
+- テストが書きやすくなる
+  - 1つの責務だけテストしたい時に、関係のない初期化やモックが不要になる。
+
+**責務とは？**
+「変更理由が同じかどうか」です。変更理由が同じものは1つの責務、違うものは別の責務と捉えると、責務の境界が見えやすくなります。
+
+#### コードで見る
+ユーザーを表す `User` モデルが、パスワードリセットに関する一連の処理を全て抱えているケースを見ていきます。
+
+##### Before: User モデルがパスワードリセットの全プロセスを抱える
+```rb
+class User < ApplicationRecord
+  has_secure_password
+
+  def reset_password!(new_password)
+    self.password = new_password
+    save!
+    UserMailer.password_reset_confirmation(self).deliver_later
+    AuditLog.create!(user: self, action: "password_reset", performed_at: Time.current)
+    Rails.cache.delete("user_#{id}_session_token")
+  end
+end
+```
+**何が問題か**
+- `User` モデルが複数の責務を抱えている
+  - 「ユーザー情報の保存」「メール送信」「監査ログの記録」「セッションキャッシュの破棄」と、変更理由がバラバラの処理が `reset_password!` の中に並んでいる。`User` モデルが「ユーザーを表すモデル」というよりも「パスワードリセットの全プロセスを知っているクラス」に肥大化している。
+- 各機能の変更が `User` モデルに波及する
+  - メール文面を変える時、監査ログのフォーマットを変える時、キャッシュの仕組みを変える時、いずれも `User` モデルに手を入れることになる。
+- テストが書きにくい
+  - `reset_password!` をテストするとき、メール送信もキャッシュ破棄も監査ログ記録も発生してしまう。「パスワードを更新するだけ」のシンプルなテストが書けず、関係のないモックを用意する必要が出てくる。
+
+##### After: ワークフローを Service に切り出し、User はコア責務に絞る
+```rb
+class User < ApplicationRecord
+  has_secure_password
+end
+
+class PasswordResetService
+  def initialize(user)
+    @user = user
+  end
+
+  def call(new_password)
+    @user.update!(password: new_password)
+    notify_user
+    record_audit
+    invalidate_session
+  end
+
+  private
+
+  def notify_user
+    UserMailer.password_reset_confirmation(@user).deliver_later
+  end
+
+  def record_audit
+    AuditLog.create!(user: @user, action: "password_reset", performed_at: Time.current)
+  end
+
+  def invalidate_session
+    Rails.cache.delete("user_#{@user.id}_session_token")
+  end
+end
+```
+
+呼び出し側のコードはこのようになります。
+```rb
+PasswordResetService.new(user).call(new_password)
+```
+
+`User` モデルから `reset_password!` を取り除き、`has_secure_password` だけを残しました。パスワードリセットの一連のワークフロー（更新・通知・監査・キャッシュ破棄）は、`PasswordResetService` に集約されています。
+
+これによって、
+- メール文面を変える時は `notify_user` だけを修正する
+- 監査ログの仕様を変える時は `record_audit` だけを修正する
+- キャッシュの仕組みを変える時は `invalidate_session` だけを修正する
+
+と、変更理由ごとに修正範囲が局所化されるようになりました。
+
+#### まとめ
+- 1つのクラス・モジュール・メソッドが担う責務は1つだけにする。クラス名から「何をする責務か」が一言で答えられる状態を目指す。
+- 責務の境界は「変更の理由が同じかどうか」で判断する。理由が違う処理は、本来は別のクラスに分けるべき関心。
+- Fat Model になりがちな処理（ワークフロー的な複数ステップ）は、Service Object に切り出すと責務がきれいに分離される。
 
 ## 実装ではなくインタフェースに依存する
 
