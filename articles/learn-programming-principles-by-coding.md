@@ -755,9 +755,242 @@ PasswordResetService.new(user).call(new_password)
 - Fat Model になりがちな処理（ワークフロー的な複数ステップ）は、Service Object に切り出すと責務がきれいに分離される。
 
 ## 実装ではなくインタフェースに依存する
+「実装ではなくインタフェースに依存する」とは、ビジネスロジック（高レベル）が、具体的な実装の詳細（低レベル）を直接知らない設計を目指すということです。
+具体的なクラス名やAPIの呼び方ではなく、「こういうメソッドをもっている」という抽象に依存することで、実装の差し替えやテストが容易になります。
 
+なお、JavaやTypeScriptのような言語では `interface` という言語機能がありますが、Rubyにはありません。Rubyでは「同じメソッド名を持つ別クラス」を差し替え可能にする、いわゆるダックタイピングで実質的なインタフェースを表現します。
+本章で「インタフェース」と呼んでいるのも、このダックタイピング的な意味での「共通の振る舞いを持つクラス群」のことです。
 
-## 凝縮度・結合度・コードの臭い
+実装ではなくインタフェースに依存することで、以下のメリットがあります。
+- 実装の差し替えが容易になる
+- テストが書きやすくなる
+- ビジネスロジックが安定する
 
+#### コードで見る
+画像をアップロードする `ImageUploader` を例にします。アップロード先として AWS S3 を使うコードが、S3のAPI呼び出しをクラス内に直接書いているケースです。
+
+##### Before: AWS S3の実装に直接依存
+```rb
+class ImageUploader
+  def upload(file, filename)
+    s3 = Aws::S3::Client.new(region: "ap-northeast-1")
+    s3.put_object(
+      bucket: "my-app-images",
+      key: filename,
+      body: file
+    )
+    "https://my-app-images.s3.ap-northeast-1.amazonaws.com/#{filename}"
+  end
+end
+```
+
+**何が問題か**
+- ビジネスロジックがS3の詳細を知っている
+  - `ImageUploader` の本来の責務は「画像をアップロードしてURLを返す」というシンプルなもの。それなのに、S3のリージョン名・バケット名・SDKのメソッド呼び出しといった詳細を抱え込んでいる。
+- 実装の差し替えができない
+  - 開発環境ではローカルファイルに保存したい、テストではメモリ上に保存したい、といった要件が出てきても、S3の実装に密結合しているため切り替えられない。
+- テストで本物のS3が必要になる
+  - `ImageUploader` をテストするには、毎回 S3 のモックを用意するか、テスト用のバケットを用意する必要がある。これではビジネスロジックだけを純粋にテストできない。
+
+##### After: Storageインタフェースに依存
+```rb
+class ImageUploader
+  def initialize(storage:)
+    @storage = storage
+  end
+
+  def upload(file, filename)
+    @storage.save(filename, file)
+  end
+end
+
+class S3Storage
+  def initialize(bucket:, region:)
+    @bucket = bucket
+    @region = region
+  end
+
+  def save(filename, file)
+    s3 = Aws::S3::Client.new(region: @region)
+    s3.put_object(bucket: @bucket, key: filename, body: file)
+    "https://#{@bucket}.s3.#{@region}.amazonaws.com/#{filename}"
+  end
+end
+
+class LocalStorage
+  def initialize(directory:)
+    @directory = directory
+  end
+
+  def save(filename, file)
+    path = File.join(@directory, filename)
+    File.binwrite(path, file)
+    "/local/#{filename}"
+  end
+end
+```
+`ImageUploader` は、`save(filename, file)` というメソッドを持つ何かしらのクラス（= Storage）に依存するようになりました。具体的に S3 を使うのか、ローカルファイルを使うのか、テスト用の Fake を使うのかは、`ImageUploader` の外側で決められます。
+
+呼び出し側では、環境に応じて実装を差し替えます。
+```rb
+# プロダクション環境
+ImageUploader.new(
+  storage: S3Storage.new(bucket: "my-app-images", region: "ap-northeast-1")
+).upload(file, "photo.png")
+
+# 開発環境（ローカルファイル）
+ImageUploader.new(
+  storage: LocalStorage.new(directory: "tmp/uploads")
+).upload(file, "photo.png")
+```
+
+テスト時には、ファイルへの書き込みすら発生しない Fake を差し込めます。
+```rb
+class FakeStorage
+  attr_reader :saved_files
+
+  def initialize
+    @saved_files = {}
+  end
+
+  def save(filename, file)
+    @saved_files[filename] = file
+    "/fake/#{filename}"
+  end
+end
+
+RSpec.describe ImageUploader do
+  it "ファイルをアップロードしてURLを返す" do
+    storage = FakeStorage.new
+    uploader = ImageUploader.new(storage: storage)
+
+    url = uploader.upload("dummy", "test.png")
+
+    expect(url).to eq("/fake/test.png")
+    expect(storage.saved_files).to have_key("test.png")
+  end
+end
+```
+`ImageUploader` の本来の責務である「ファイルとファイル名を受け取って、保存先の URL を返す」というロジックだけを、外部依存なしでテストできるようになりました。
+
+#### まとめ
+- 高レベル（ビジネスロジック）が、低レベル（具体的な実装の詳細）を直接知らない設計を目指す。
+- Rubyではダックタイピングを利用して、「同じメソッド名を持つ別クラス」を差し替え可能にすることで、インタフェース依存を実現する。
+
+## 凝縮度・結合度
+
+### 凝縮度
+凝縮度は、1つのモジュールの中で、そこに含まれているすべての要素が同じ目的に貢献しているかを測る尺度です。
+- 高凝縮: クラス内のメソッドや属性が、すべて1つの責務に向かって貢献している。
+- 低凝縮: 関係のない処理が同じクラスに混在している。
+
+低凝縮のクラスを見ていきます。
+```rb
+class User < ApplicationRecord
+  has_secure_password
+
+  def authenticate(password)
+    BCrypt::Password.new(password_digest) == password
+  end
+
+  # 関係のない処理が混入している
+  def total_revenue_in_yen
+    orders.sum(&:total)
+  end
+
+  def generate_monthly_report_csv
+    CSV.generate do |csv|
+      csv << ["title", "amount"]
+      orders.each { |o| csv << [o.title, o.total] }
+    end
+  end
+end
+```
+
+`User` というクラス名なのに、認証・売上計算・CSVレポート生成という、互いに無関係な責務が混在しています。これは凝縮度が低い状態です。
+前章で扱った単一責任の原則を守ると、自然と凝縮度の高いクラスになります。
+```rb
+class User < ApplicationRecord
+  has_secure_password
+
+  def authenticate(password)
+    BCrypt::Password.new(password_digest) == password
+  end
+end
+
+class UserRevenueCalculator
+  def initialize(user)
+    @user = user
+  end
+
+  def total_in_yen
+    @user.orders.sum(&:total)
+  end
+end
+
+class UserMonthlyReportCsv
+  def initialize(user)
+    @user = user
+  end
+
+  def generate
+    CSV.generate do |csv|
+      csv << ["title", "amount"]
+      @user.orders.each { |o| csv << [o.title, o.total] }
+    end
+  end
+end
+```
+
+それぞれのクラスが「1つの目的」だけを担うようになり、`User` クラスは認証関連だけに集中できるようになりました。
+
+### 結合度
+結合度は、2つ以上のモジュールが、互いの内部にどれだけ深く踏み込んでいるかを測る尺度です。
+- 密結合: 一方の変更が他方にも変更を強いる。互いの内部実装を知り合っている状態。
+- 疎結合: インタフェースだけで会話していて、内部実装の変更が波及しない状態。
+
+疎結合に保つコツとしては、
+- データの受け渡しは引数で行う（グローバル変数や共有状態を避ける）
+- 相手のクラスの内部状態を直接書き換えない
+- 振る舞いが、渡された値によって変わらない（ステートレスな設計）
+
+といった指針があります。密結合の例を見ていきます。
+
+```rb
+class Notifier
+  def notify(user, message)
+    return if user.preferences[:notifications_enabled] == false
+    return if user.banned_at.present?
+
+    SlackClient.new.post(user.slack_account_id, message)
+  end
+end
+```
+`Notifier` が `User` の内部構造（`preferences` のキー、`banned_at` の存在）を直接知っているため、`User` 側でカラム名や条件を変えると `Notifier` も書き直す必要があります。これは結合度が高い状態です。
+
+```rb
+class Notifier
+  def notify(user, message)
+    return unless user.notifiable?
+    user.send_notification(message)
+  end
+end
+
+class User < ApplicationRecord
+  def notifiable?
+    preferences[:notifications_enabled] && banned_at.nil?
+  end
+
+  def send_notification(message)
+    SlackClient.new.post(slack_account_id, message)
+  end
+end
+```
+`Notifier` は `User` の中身を知らずに、`notifiable?` と `send_notification` というインタフェースを通じて会話するようになりました。
+`User` 側の内部実装が変わっても、`Notifier` は変更不要です。
+
+#### まとめ
+- 凝縮度はモジュール内の純度、結合度はモジュール間の関係の密度を測る物差し。高凝縮・疎結合のコードを目指す。
+- 凝縮度を高めるには単一責任、結合度を下げるにはインタフェースへの依存が、それぞれ具体的な手段になる。
 
 ## おわりに
