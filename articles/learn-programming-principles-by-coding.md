@@ -482,6 +482,9 @@ class Order < ApplicationRecord
   end
 end
 ```
+
+![](/images/slap_abstraction_levels.png)
+
 `confirm!` メソッドの中身を読むだけで、「在庫を確認 → 減算 → ポイント付与 → ステータス更新 → 通知」という確定処理の全体像が掴めるようになりました。メソッド名そのものが処理の意図を表す形になっています。
 
 各メソッドの詳細を読みたい場合は、対応する `private` メソッドに降りていくだけです。
@@ -653,6 +656,9 @@ class SmsChannel
   end
 end
 ```
+
+![](/images/ocp_extension_impact.png)
+
 チャネルを `deliver(notification)` という共通インターフェースを持ったクラスに切り出しました。`NotificationSender#dispatch` は「`channel` の値に対応するクラスを選んで `deliver` を呼ぶだけ」というシンプルな構造になっています。
 
 これで、新しいチャネル（例: in_app）を追加する時にやることは、以下の2つだけです。
@@ -799,6 +805,8 @@ end
   - 開発環境ではローカルファイルに保存したい、テストではメモリ上に保存したい、といった要件が出てきても、S3の実装に密結合しているため切り替えられない。
 - テストで本物のS3が必要になる
   - `ImageUploader` をテストするには、毎回 S3 のモックを用意するか、テスト用のバケットを用意する必要がある。これではビジネスロジックだけを純粋にテストできない。
+
+![](/images/interface_dependency_direction.png)
 
 ##### After: Storageインタフェースに依存
 ```rb
@@ -951,6 +959,8 @@ end
 ```
 
 それぞれのクラスが「1つの目的」だけを担うようになり、`User` クラスは認証関連だけに集中できるようになりました。
+
+![](/images/cohesion_coupling_matrix.png)
 
 ### 結合度
 結合度は、2つ以上のモジュールが、互いの内部にどれだけ深く踏み込んでいるかを測る尺度です。
