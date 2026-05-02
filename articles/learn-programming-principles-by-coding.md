@@ -34,7 +34,7 @@ AIによってコードを書く速さは格段に早くなりましたが、そ
 
 本記事では、以下の9つ原則を3つのカテゴリに分けて解説していきます。
 
-![](/images/programming_principles_overview.svg)
+![](/images/programming_principles_overview.png)
 
 ## KISS / YAGNI（コードをシンプルに保つ）
 
