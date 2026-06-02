@@ -3,7 +3,7 @@ title: "Claude Codeを起動するとMacがカーネルパニックする原因�
 emoji: "💥"
 type: "tech" # tech: 技術記事 / idea: アイデア
 topics: ['macOS', 'ClaudeCode', 'vnode', 'kernelpanic', 'Spotlight']
-published: false
+published: true
 ---
 
 ## はじめに
@@ -105,6 +105,12 @@ for i in $(seq 1 2000); do (/bin/echo hi > /dev/null) & done; wait
 dd if=/dev/zero of=/tmp/bigtest bs=1m count=8000
 cat /tmp/bigtest > /dev/null
 ```
+
+それぞれのコマンドが何をしているかを補足します。
+
+- `for i in $(seq 1 10); do yes > /dev/null & done` … `yes` は同じ文字を延々と出力し続けるコマンドで、CPUを使い切ります。それを `&`（バックグラウンド実行）で10個同時に走らせ、全コアを全開にしています。
+- `for i in $(seq 1 2000); do (/bin/echo hi > /dev/null) & done; wait` … プロセスを2000個まとめて起動し、短時間に大量のプロセス生成（fork/exec）が起きる状況を作っています。`wait` は起動した全プロセスの終了を待つ指定です。
+- `dd if=/dev/zero of=/tmp/bigtest bs=1m count=8000` … `dd` はデータをコピーするコマンドで、ここでは8GBのファイルを作成しています。`cat ... > /dev/null` でそれを一気に読み込み、メモリへの大量読み込み（page-in）を発生させています。
 
 :::message
 **page-in とは**
@@ -269,6 +275,8 @@ sudo launchctl load -w /Library/LaunchDaemons/limit.vnodes.plist
 while true; do echo "$(date +%T) $(sysctl -n kern.num_vnodes)"; sleep 2; done
 ```
 
+これは「2秒ごとに、現在時刻と使用中のvnode数を表示し続ける」ワンライナーです。`while true; do ... done` で無限ループを回し、`sleep 2` で2秒間隔をあけています。これを流しっぱなしにすることで、vnodeが増え続けるのか、横ばいで安定するのかをリアルタイムに観察できます（止めるときは `Ctrl + C`）。
+
 対処後は **数 vnode/秒** 程度でほぼ横ばいになり、上限に対して十分な余裕を保ったまま安定しました（以前は短時間で上限に張り付いていました）。この状態であれば、新しいvnodeを要求しても枯渇せず、`launchd` が死ぬこともありません。
 
 ![](/images/vnode-graph.png)
@@ -297,6 +305,8 @@ mdutil -s /
 ls -lt ~/Library/Logs/DiagnosticReports/ | head
 ls -lt /Library/Logs/DiagnosticReports/ | head
 ```
+
+`lsof` は「開いているファイル一覧（list open files）」を表示するコマンドです。上の例では、その出力をプロセス名で集計し、開いているファイル数が多い順に並べています（`awk` で1列目のプロセス名を取り出し、`sort | uniq -c` で件数を数え、`sort -rn` で多い順に並べ替え）。どのプロセスがたくさんファイルを開いているかの当たりをつけるのに使えます。
 
 ## おわりに
 
