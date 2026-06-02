@@ -20,6 +20,11 @@ published: false
 本記事はあくまで自分の環境で起きた事象と、その調査・対処の記録です。環境によって原因は異なる可能性があります。また、間違っている説明や解釈がありましたら、ご指摘いただけると幸いです。
 :::
 
+:::message
+**カーネルパニックとは**
+OS（macOS）の中核であるカーネルが、これ以上処理を続けると危険だと判断したときに、システム全体を強制的に停止させる仕組みです。Windowsでいう「ブルースクリーン」に近いもので、発生するとMacは強制的に再起動します。
+:::
+
 ## 発生した環境
 
 - MacBook Pro (Mac16,1) / Apple M4 / メモリ 24GB
@@ -34,17 +39,26 @@ published: false
 
 ## まずはカーネルパニックのログを読む
 
-OSごと落ちているので、まずは `~/Library/Logs/DiagnosticReports/` にある `.panic` ファイルを開いてみました。すると、毎回まったく同じ署名が記録されていました。
+OSごと落ちているので、まずはカーネルパニックのログを開いてみました。macOSでは、カーネルパニックが起きると `~/Library/Logs/DiagnosticReports/` に `.panic` という拡張子のログファイル（パニック時の状況を記録した診断レポート）が自動で保存されます。
+
+開いてみると、毎回まったく同じ署名が記録されていました。
 
 ```
 panic(cpu N caller ...): initproc exited -- exit reason namespace 2 subcode 0xa
 Panicked task ...: pid 1: launchd
 ```
 
-ここから読み取れたのは、
+ここでキーになるのが `launchd`（ランチディー）と `initproc` です。
 
-- `initproc exited` = **`launchd`（PID 1、全プロセスの親）が終了している**
-- `launchd` はOSの根幹なので、これが死ぬとカーネルは続行不能と判断して **パニック → 強制再起動** する
+:::message
+**launchd / initproc とは**
+`launchd` は、macOSが起動して最初に立ち上がる、すべてのプロセスの親にあたる管理プロセスです。プロセスIDが `1`（PID 1）で、他のアプリやサービスはすべてこの `launchd` から生まれます。`initproc` はこの「最初のプロセス（＝launchd）」を指すカーネル内部での呼び名です。
+:::
+
+このログから読み取れたのは、
+
+- `initproc exited` = **`launchd`（PID 1）が終了している**
+- `launchd` はOSの根幹なので、これが死ぬとカーネルは「もう続行できない」と判断して **パニック → 強制再起動** する
 
 ということでした。
 
@@ -71,6 +85,13 @@ panic文字列中の `namespace` / `subcode` の数値の意味は資料によ�
 | ストレージ / ファイルシステムの破損 | `diskutil verifyVolume /`・SMART | シロ（問題なし） |
 | ハードウェアの故障 | Apple Diagnostics | シロ（`ADP000`） |
 
+:::message
+上の表で使ったチェック方法の補足です。
+- **`diskutil verifyVolume /`** … macOS標準のコマンドで、ディスク（ファイルシステム）に破損がないか検証します。
+- **SMART** … ストレージ自身が持つ自己診断機能。ディスクの健康状態を確認できます。
+- **Apple Diagnostics** … Mac内蔵のハードウェア診断ツール。起動時に特定のキーを押すと実行でき、メモリやSoCなどに異常がないかを調べられます。`ADP000` は「問題なし」を表す結果コードです。
+:::
+
 特に効いたのが、**「単純な高負荷」では落ちないことを確認できた** ことです。Claude Code は内部で git や ripgrep を多用するので、最初は「大量のプロセス生成やメモリ負荷で落ちているのでは」と考えました。そこで、負荷の種類を分けて単体で再現を試みました。
 
 ```bash
@@ -84,6 +105,11 @@ for i in $(seq 1 2000); do (/bin/echo hi > /dev/null) & done; wait
 dd if=/dev/zero of=/tmp/bigtest bs=1m count=8000
 cat /tmp/bigtest > /dev/null
 ```
+
+:::message
+**page-in とは**
+ディスク上のデータをメモリに読み込む操作のことです。ここでは「メモリへ大量にデータを読み込む負荷」をかけて、それが原因で落ちないかを確認しています。
+:::
 
 CPUを全開で回しても、プロセスを2000個生成しても、8GBのファイルを一気に読み込んでも、まったく落ちませんでした。それなのに Claude Code を起動すると落ちる。
 
@@ -99,7 +125,9 @@ sysctl kern.num_vnodes kern.maxvnodes
 # kern.maxvnodes: 263168
 ```
 
-**使用中の vnode 数（`num_vnodes`）が、上限（`maxvnodes`）にぴったり張り付いていました。** しかも、再起動してまだ5分しか経っていないのに、すでに上限に達していました。
+`sysctl` はカーネルの各種パラメータを確認・変更するコマンドです。ここでは現在使用中のvnode数（`num_vnodes`）と、その上限（`maxvnodes`）を表示しています。
+
+**使用中の vnode 数が、上限にぴったり張り付いていました。** しかも、再起動してまだ5分しか経っていないのに、すでに上限に達していました。
 
 ### そもそも vnode とは
 
@@ -133,7 +161,7 @@ vnodeの枯渇だと考えると、ここまでの検証結果がすべて説明
 
 ## では、誰がvnodeを食い尽くしていたのか
 
-次に「何がvnodeをそんなに消費しているのか」を調べました。ここで役立ったのが `fs_usage` です。今まさに何がファイルシステムにアクセスしているかを、プロセス名つきで実況してくれます。
+次に「何がvnodeをそんなに消費しているのか」を調べました。ここで役立ったのが `fs_usage` です。今まさに何がファイルシステムにアクセスしているかを、プロセス名つきでリアルタイムに表示してくれるコマンドです。
 
 ```bash
 sudo fs_usage -w -f filesys 2>/dev/null | head -100
@@ -146,7 +174,14 @@ sudo fs_usage -w -f filesys 2>/dev/null | head -100
 .../node_modules/caniuse-lite/data/features/input-color.js
 ```
 
-ファイルを開いていた主役は、**Spotlightのインデックス作成プロセス**（`mds_stores` / `mdworker_shared`）でした。開発プロジェクトの `node_modules` にある数万〜数十万のファイルを片っ端からインデックスしようとして、vnodeを上限まで食い尽くしていたのです。
+ファイルを開いていた主役は、**Spotlightのインデックス作成プロセス**（`mds_stores` / `mdworker_shared`）でした。
+
+:::message
+**Spotlight とは**
+macOSに標準で備わっているファイル検索機能です（`⌘ + スペース` で出てくる検索窓）。高速に検索できるよう、裏側でファイルの中身を読み取って索引（インデックス）を作っており、その作成を担当する裏方のプロセスが `mds_stores` や `mdworker_shared` です。
+:::
+
+開発プロジェクトの `node_modules` にある数万〜数十万のファイルを片っ端からインデックスしようとして、vnodeを上限まで食い尽くしていたのです。
 
 決定的だったのは、**Claude Code を終了させてもvnodeが増え続けた** ことです。これで「食っていたのは Claude Code ではなく Spotlight」だと確信できました。
 
@@ -169,7 +204,9 @@ find ~/projects -type d -name node_modules -prune 2>/dev/null \
   | while read d; do touch "$d/.metadata_never_index"; done
 ```
 
-必要に応じて、一度インデックスを停止・消去してから、除外設定を入れた状態で作り直します。
+`.metadata_never_index` という名前の空ファイルをフォルダに置いておくと、Spotlightはそのフォルダをインデックスしなくなります。
+
+必要に応じて、`mdutil`（Spotlightのインデックスを管理するコマンド）で一度インデックスを停止・消去してから、除外設定を入れた状態で作り直します。
 
 ```bash
 sudo mdutil -i off -a   # インデックス作成を停止
@@ -190,7 +227,12 @@ sudo sysctl kern.maxvnodes=2000000
 sysctl kern.num_vnodes kern.maxvnodes
 ```
 
-ただし `sudo sysctl` は再起動するとリセットされてしまうので、起動時に自動で適用されるよう LaunchDaemon を作成します。
+ただし `sudo sysctl` で設定した値は再起動するとリセットされてしまうので、起動時に自動で適用されるよう LaunchDaemon を作成します。
+
+:::message
+**LaunchDaemon とは**
+macOSが起動するタイミングで、指定したコマンドを自動的に実行してくれる仕組みです。`/Library/LaunchDaemons/` に設定ファイル（plist）を置いておくと、再起動のたびに毎回手で打たなくても設定が適用されます。
+:::
 
 ```bash
 sudo tee /Library/LaunchDaemons/limit.vnodes.plist > /dev/null <<'EOF'
@@ -269,4 +311,3 @@ ls -lt /Library/Logs/DiagnosticReports/ | head
 - `node_modules` はSpotlightの検索対象から外しておくと、インデックスの無駄もなくなり一石二鳥。
 
 普段あまり意識しない低レイヤーのリソースが原因になることもあるのだと、良い勉強になりました。同じ現象に悩んでいる方の参考になれば嬉しいです。
-
